@@ -1,7 +1,4 @@
-use std::{
-    io::{self, Write},
-    sync::Mutex,
-};
+use std::{io, sync::Mutex};
 
 const UART_RX_FIFO_SIZE: usize = 64;
 
@@ -34,6 +31,9 @@ struct Uart16550Inner {
     rx_head: usize,
     rx_tail: usize,
     irq_pending: bool,
+    irq_edge: bool,
+    thr_interrupt_pending: bool,
+    thr_interrupt_armed: bool,
 }
 
 impl Uart16550Inner {
@@ -55,6 +55,9 @@ impl Uart16550Inner {
             rx_head: 0,
             rx_tail: 0,
             irq_pending: false,
+            irq_edge: false,
+            thr_interrupt_pending: false,
+            thr_interrupt_armed: false,
         }
     }
 
@@ -86,19 +89,36 @@ impl Uart16550Inner {
     }
 
     fn update_irq(&mut self) {
+        let was_pending = self.irq_pending;
         self.irq_pending = false;
         self.iir = UART_IIR_NO_INT;
 
         if (self.lsr & UART_LSR_DR) != 0 && (self.ier & UART_IER_RDI) != 0 {
             self.irq_pending = true;
             self.iir = UART_IIR_RDI;
+            if !was_pending {
+                self.irq_edge = true;
+            }
             return;
         }
 
-        if (self.lsr & UART_LSR_THRE) != 0 && (self.ier & UART_IER_THRI) != 0 {
+        if self.thr_interrupt_pending && (self.ier & UART_IER_THRI) != 0 {
             self.irq_pending = true;
             self.iir = UART_IIR_THRI;
+            if !was_pending {
+                self.irq_edge = true;
+            }
         }
+    }
+
+    fn latch_thr_interrupt_if_enabled(&mut self) {
+        if self.thr_interrupt_armed
+            && (self.lsr & UART_LSR_THRE) != 0
+            && (self.ier & UART_IER_THRI) != 0
+        {
+            self.thr_interrupt_pending = true;
+        }
+        self.update_irq();
     }
 
     fn read(&mut self, offset: u8) -> u8 {
@@ -124,7 +144,11 @@ impl Uart16550Inner {
             }
             2 => {
                 let value = self.iir;
-                self.irq_pending = false;
+                if value == UART_IIR_THRI {
+                    self.thr_interrupt_pending = false;
+                    self.thr_interrupt_armed = false;
+                }
+                self.update_irq();
                 value
             }
             3 => self.lcr,
@@ -145,7 +169,9 @@ impl Uart16550Inner {
                     self.thr = value;
                     serial_output(value)?;
                     self.lsr |= UART_LSR_THRE | UART_LSR_TEMT;
-                    self.update_irq();
+                    self.thr_interrupt_pending = false;
+                    self.thr_interrupt_armed = true;
+                    self.latch_thr_interrupt_if_enabled();
                 }
             }
             1 => {
@@ -153,7 +179,7 @@ impl Uart16550Inner {
                     self.dlm = value;
                 } else {
                     self.ier = value;
-                    self.update_irq();
+                    self.latch_thr_interrupt_if_enabled();
                 }
             }
             3 => {
@@ -186,6 +212,9 @@ impl Uart16550 {
         inner.rx_fifo_push(ch);
         inner.lsr |= UART_LSR_DR;
         inner.update_irq();
+        if (inner.ier & UART_IER_RDI) != 0 {
+            inner.irq_edge = true;
+        }
     }
 
     pub fn read(&self, offset: u8) -> u8 {
@@ -198,6 +227,21 @@ impl Uart16550 {
             .expect("uart lock poisoned")
             .write(offset, value)
     }
+
+    pub fn poll_tx(&self) {
+        self.inner.lock().expect("uart lock poisoned").update_irq();
+    }
+
+    pub fn interrupt_pending(&self) -> bool {
+        self.inner.lock().expect("uart lock poisoned").irq_pending
+    }
+
+    pub fn take_interrupt_edge(&self) -> bool {
+        let mut inner = self.inner.lock().expect("uart lock poisoned");
+        let edge = inner.irq_edge;
+        inner.irq_edge = false;
+        edge
+    }
 }
 
 impl Default for Uart16550 {
@@ -206,10 +250,18 @@ impl Default for Uart16550 {
     }
 }
 
+#[cfg(not(test))]
 fn serial_output(value: u8) -> io::Result<()> {
+    use std::io::Write as _;
+
     let mut stdout = io::stdout().lock();
     stdout.write_all(&[value])?;
     stdout.flush()
+}
+
+#[cfg(test)]
+fn serial_output(_value: u8) -> io::Result<()> {
+    Ok(())
 }
 
 #[cfg(test)]
@@ -221,5 +273,28 @@ mod tests {
         let uart = Uart16550::new();
         uart.receive_byte(b'A');
         assert_eq!(uart.read(0), b'A');
+    }
+
+    #[test]
+    fn transmit_empty_interrupt_latches_on_write_and_ier_enable() {
+        let uart = Uart16550::new();
+        assert!(!uart.interrupt_pending());
+        assert!(!uart.take_interrupt_edge());
+        uart.write(1, 0x02).unwrap();
+        assert!(!uart.interrupt_pending());
+        assert!(!uart.take_interrupt_edge());
+        uart.write(0, b'X').unwrap();
+        assert!(uart.interrupt_pending());
+        assert!(uart.take_interrupt_edge());
+        assert!(!uart.take_interrupt_edge());
+        assert_eq!(uart.read(2), 0x02);
+        assert!(!uart.interrupt_pending());
+
+        uart.write(1, 0x00).unwrap();
+        uart.write(0, b'Y').unwrap();
+        assert!(!uart.interrupt_pending());
+        uart.write(1, 0x02).unwrap();
+        assert!(uart.interrupt_pending());
+        assert!(uart.take_interrupt_edge());
     }
 }

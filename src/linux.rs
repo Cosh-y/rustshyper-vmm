@@ -19,6 +19,14 @@ const DEFAULT_KERNEL_LOAD_ADDR: u64 = 0x0010_0000;
 const DEFAULT_BOOT_STACK_PTR: u64 = 0x001f_f000;
 const DEFAULT_CMDLINE: &str = "console=ttyS0 earlycon=uart8250,io,0x3f8 nokaslr";
 
+const ACPI_RSDP_GPA: u64 = 0x000f_0000;
+const ACPI_RSDT_GPA: u32 = 0x000f_1000;
+const ACPI_FADT_GPA: u32 = 0x000f_2000;
+const ACPI_MADT_GPA: u32 = 0x000f_3000;
+const LAPIC_BASE: u32 = 0xfee0_0000;
+const IOAPIC_BASE: u32 = 0xfec0_0000;
+const IOAPIC_ID: u8 = 1;
+
 const X86_CR0_PE: u64 = 1 << 0;
 const X86_CR0_ET: u64 = 1 << 4;
 const X86_CR0_NE: u64 = 1 << 5;
@@ -244,14 +252,17 @@ pub fn load_bzimage(
         hdr: header,
         ..BootParams::default()
     };
+    boot_params.acpi_rsdp_addr = ACPI_RSDP_GPA;
     let e820_entries = make_e820_entries(config.guest_mem_size);
     boot_params.e820_entries = e820_entries.len() as u8;
     for (index, entry) in e820_entries.iter().enumerate() {
         boot_params.e820_table[index] = *entry;
     }
+    write_acpi_tables(guest_memory)?;
     write_guest(guest_memory, ZERO_PAGE_GPA, as_bytes(&boot_params))?;
 
     let entry_point = u64::from(header.code32_start);
+    println!("rustshyper-vmm: Linux entry point at {entry_point:#x}");
     Ok(LinuxBootState {
         regs: VcpuRegs {
             rip: entry_point,
@@ -349,6 +360,123 @@ fn make_e820_entries(guest_mem_size: u64) -> Vec<BootE820Entry> {
         });
     }
     entries
+}
+
+fn write_acpi_tables(guest_memory: &mut [u8]) -> io::Result<()> {
+    let madt = build_madt();
+    let rsdt = build_rsdt(&[ACPI_MADT_GPA, ACPI_FADT_GPA]);
+    let rsdp = build_rsdp(ACPI_RSDT_GPA);
+    let fadt = build_fadt();
+
+    write_guest(guest_memory, u64::from(ACPI_MADT_GPA), &madt)?;
+    write_guest(guest_memory, u64::from(ACPI_RSDT_GPA), &rsdt)?;
+    write_guest(guest_memory, ACPI_RSDP_GPA, &rsdp)?;
+    write_guest(guest_memory, u64::from(ACPI_FADT_GPA), &fadt)?;
+    Ok(())
+}
+
+fn build_madt() -> Vec<u8> {
+    let mut table = acpi_header(*b"APIC", 56, 1);
+    push_u32(&mut table, LAPIC_BASE);
+    // PCAT_COMPAT flag. If set means dual 8259 PIC is present.
+    push_u32(&mut table, 0);
+
+    table.extend_from_slice(&[
+        0, 8, // Processor local APIC
+        0, 0, // ACPI processor ID, APIC ID
+    ]);
+    push_u32(&mut table, 1);
+
+    table.extend_from_slice(&[
+        1, 12, // I/O APIC
+        IOAPIC_ID, 0, // I/O APIC ID, reserved
+    ]);
+    push_u32(&mut table, IOAPIC_BASE);
+    push_u32(&mut table, 0);
+
+    finish_acpi_table(table)
+}
+
+fn build_fadt() -> Vec<u8> {
+    let mut table = acpi_header(*b"FACP", 244, 6);
+    push_u32(&mut table, 0);         // Firmware Control
+    push_u32(&mut table, 0);         // DSDT
+    table.push(0);                              // Reserved
+    table.push(0);                              // Preferred PM Profile
+    /* https://uefi.org/htmlspecs/ACPI_Spec_6_4_html/05_ACPI_Software_Programming_Model/ACPI_Software_Programming_Model.html#fixed-acpi-description-table-fadt
+    / System vector the SCI interrupt is wired to in 8259 mode. 
+    / On systems that do not contain the 8259, 
+    / this field contains the Global System interrupt number of the SCI interrupt.
+    */
+    push_u16(&mut table, 9);         // SCI_INT
+
+    table.resize(244, 0);
+
+    table[109..111].copy_from_slice(&0u16.to_le_bytes());  // IAPC_BOOT_ARCH
+    
+    finish_acpi_table(table)
+}
+
+fn build_rsdt(entries: &[u32]) -> Vec<u8> {
+    let mut table = acpi_header(*b"RSDT", 36 + entries.len() as u32 * 4, 1);
+    for entry in entries {
+        push_u32(&mut table, *entry);
+    }
+    finish_acpi_table(table)
+}
+
+fn build_rsdp(rsdt_gpa: u32) -> Vec<u8> {
+    let mut rsdp = Vec::with_capacity(36);
+    rsdp.extend_from_slice(b"RSD PTR ");
+    rsdp.push(0);
+    rsdp.extend_from_slice(b"RSHVMM");
+    rsdp.push(2);
+    push_u32(&mut rsdp, rsdt_gpa);
+    push_u32(&mut rsdp, 36);
+    push_u64(&mut rsdp, 0);
+    rsdp.push(0);
+    rsdp.extend_from_slice(&[0; 3]);
+
+    rsdp[8] = acpi_checksum(&rsdp[..20]);
+    rsdp[32] = acpi_checksum(&rsdp);
+    rsdp
+}
+
+fn acpi_header(signature: [u8; 4], length: u32, revision: u8) -> Vec<u8> {
+    let mut header = Vec::with_capacity(length as usize);
+    header.extend_from_slice(&signature);
+    push_u32(&mut header, length);
+    header.push(revision);
+    header.push(0);
+    header.extend_from_slice(b"RSHVMM");
+    header.extend_from_slice(b"RUSTSHYP");
+    push_u32(&mut header, 1);
+    push_u32(&mut header, u32::from_le_bytes(*b"RSHV"));
+    push_u32(&mut header, 1);
+    header
+}
+
+fn finish_acpi_table(mut table: Vec<u8>) -> Vec<u8> {
+    let length = table.len() as u32;
+    table[4..8].copy_from_slice(&length.to_le_bytes());
+    table[9] = acpi_checksum(&table);
+    table
+}
+
+fn acpi_checksum(bytes: &[u8]) -> u8 {
+    0_u8.wrapping_sub(bytes.iter().fold(0_u8, |sum, byte| sum.wrapping_add(*byte)))
+}
+
+fn push_u16(buf: &mut Vec<u8>, value: u16) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u32(buf: &mut Vec<u8>, value: u32) {
+    buf.extend_from_slice(&value.to_le_bytes());
+}
+
+fn push_u64(buf: &mut Vec<u8>, value: u64) {
+    buf.extend_from_slice(&value.to_le_bytes());
 }
 
 fn build_linux_boot_gdt() -> [u64; 5] {
@@ -505,5 +633,31 @@ mod tests {
         assert_eq!(sregs.tr.selector, 0x20);
         assert_eq!(sregs.ldt.unusable, 1);
         assert_eq!(sregs.cr0, X86_CR0_PE | X86_CR0_ET | X86_CR0_NE);
+    }
+
+    #[test]
+    fn acpi_tables_have_valid_checksums() {
+        let madt = build_madt();
+        let rsdt = build_rsdt(&[ACPI_MADT_GPA]);
+        let rsdp = build_rsdp(ACPI_RSDT_GPA);
+
+        assert_eq!(
+            madt.iter().fold(0_u8, |sum, byte| sum.wrapping_add(*byte)),
+            0
+        );
+        assert_eq!(
+            rsdt.iter().fold(0_u8, |sum, byte| sum.wrapping_add(*byte)),
+            0
+        );
+        assert_eq!(
+            rsdp[..20]
+                .iter()
+                .fold(0_u8, |sum, byte| sum.wrapping_add(*byte)),
+            0
+        );
+        assert_eq!(
+            rsdp.iter().fold(0_u8, |sum, byte| sum.wrapping_add(*byte)),
+            0
+        );
     }
 }

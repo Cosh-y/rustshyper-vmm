@@ -56,7 +56,9 @@ pub const RSH_SET_SREGS: c_ulong = iow::<VcpuSregs>(RSH_IOC_TYPE, 0x84);
 pub const RSH_INJECT_INTERRUPT: c_ulong = iow::<u32>(RSH_IOC_TYPE, 0x85);
 
 pub const VMX_EXIT_REASON_HLT: u32 = 12;
+pub const VMX_EXIT_REASON_TRIPLE_FAULT: u32 = 2;
 pub const VMX_EXIT_REASON_IO_INSTRUCTION: u32 = 30;
+pub const VMX_EXIT_REASON_PAUSE_INSTRUCTION: u32 = 40;
 pub const VMX_EXIT_REASON_EPT_VIOLATION: u32 = 48;
 pub const VMX_EXIT_REASON_PREEMPTION_TIMER: u32 = 52;
 

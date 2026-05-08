@@ -6,12 +6,12 @@ use std::{
     ptr::NonNull,
 };
 
-use libc::{c_void, mmap, munmap, MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ, PROT_WRITE};
+use libc::{MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ, PROT_WRITE, c_void, mmap, munmap};
 
 use crate::ioctl::{
-    RunState, UserMemoryRegion, VcpuRegs, VcpuSregs, RSH_CREATE_VCPU, RSH_CREATE_VM,
-    RSH_GET_API_VERSION, RSH_GET_REGS, RSH_GET_SREGS, RSH_INJECT_INTERRUPT, RSH_INJECT_IRQ,
-    RSH_RUN, RSH_SET_REGS, RSH_SET_SREGS, RSH_SET_USER_MEMORY_REGION,
+    RSH_CREATE_VCPU, RSH_CREATE_VM, RSH_GET_API_VERSION, RSH_GET_REGS, RSH_GET_SREGS,
+    RSH_INJECT_INTERRUPT, RSH_INJECT_IRQ, RSH_RUN, RSH_SET_REGS, RSH_SET_SREGS,
+    RSH_SET_USER_MEMORY_REGION, RunState, UserMemoryRegion, VcpuRegs, VcpuSregs,
 };
 
 fn ioctl_request(req: libc::c_ulong) -> libc::Ioctl {
@@ -85,9 +85,13 @@ pub struct VmHandle {
 
 impl VmHandle {
     pub fn create_vcpu(&self, vcpu_id: u32) -> io::Result<VcpuHandle> {
-        let fd = ioctl_with_ref(self.file.as_raw_fd(), RSH_CREATE_VCPU, &vcpu_id).map_err(|err| {
-            with_context(err, &format!("RSH_CREATE_VCPU failed for vcpu_id={vcpu_id}"))
-        })?;
+        let fd =
+            ioctl_with_ref(self.file.as_raw_fd(), RSH_CREATE_VCPU, &vcpu_id).map_err(|err| {
+                with_context(
+                    err,
+                    &format!("RSH_CREATE_VCPU failed for vcpu_id={vcpu_id}"),
+                )
+            })?;
         let vcpu_file = unsafe { File::from_raw_fd(fd) };
         Ok(VcpuHandle { file: vcpu_file })
     }
@@ -219,6 +223,10 @@ impl GuestMemory {
 
     pub fn as_mut_slice(&mut self) -> &mut [u8] {
         unsafe { std::slice::from_raw_parts_mut(self.ptr.as_ptr(), self.len) }
+    }
+
+    pub fn as_slice(&self) -> &[u8] {
+        unsafe { std::slice::from_raw_parts(self.ptr.as_ptr(), self.len) }
     }
 }
 
