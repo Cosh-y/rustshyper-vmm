@@ -18,6 +18,7 @@ struct Uart16550Inner {
     rbr: u8,
     thr: u8,
     ier: u8,
+    /// ISR(Interrupt Status Register) in 16550 spec
     iir: u8,
     lcr: u8,
     mcr: u8,
@@ -212,9 +213,9 @@ impl Uart16550 {
         inner.rx_fifo_push(ch);
         inner.lsr |= UART_LSR_DR;
         inner.update_irq();
-        if (inner.ier & UART_IER_RDI) != 0 {
-            inner.irq_edge = true;
-        }
+        // if (inner.ier & UART_IER_RDI) != 0 {
+        //     inner.irq_edge = true;
+        // }
     }
 
     pub fn read(&self, offset: u8) -> u8 {
