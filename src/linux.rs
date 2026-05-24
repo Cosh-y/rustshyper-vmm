@@ -173,6 +173,7 @@ impl Default for BootParams {
 pub struct LinuxBootConfig<'a> {
     pub kernel_load_addr: u64,
     pub guest_mem_size: u64,
+    pub vcpu_count: u32,
     pub initrd: Option<&'a [u8]>,
     pub cmdline: Option<&'a str>,
     pub stack_pointer: u64,
@@ -258,7 +259,7 @@ pub fn load_bzimage(
     for (index, entry) in e820_entries.iter().enumerate() {
         boot_params.e820_table[index] = *entry;
     }
-    write_acpi_tables(guest_memory)?;
+    write_acpi_tables(guest_memory, config.vcpu_count)?;
     write_guest(guest_memory, ZERO_PAGE_GPA, as_bytes(&boot_params))?;
 
     let entry_point = u64::from(header.code32_start);
@@ -362,8 +363,8 @@ fn make_e820_entries(guest_mem_size: u64) -> Vec<BootE820Entry> {
     entries
 }
 
-fn write_acpi_tables(guest_memory: &mut [u8]) -> io::Result<()> {
-    let madt = build_madt();
+fn write_acpi_tables(guest_memory: &mut [u8], vcpu_count: u32) -> io::Result<()> {
+    let madt = build_madt(vcpu_count);
     let rsdt = build_rsdt(&[ACPI_MADT_GPA, ACPI_FADT_GPA]);
     let rsdp = build_rsdp(ACPI_RSDT_GPA);
     let fadt = build_fadt();
@@ -375,17 +376,22 @@ fn write_acpi_tables(guest_memory: &mut [u8]) -> io::Result<()> {
     Ok(())
 }
 
-fn build_madt() -> Vec<u8> {
+fn build_madt(vcpu_count: u32) -> Vec<u8> {
     let mut table = acpi_header(*b"APIC", 56, 1);
     push_u32(&mut table, LAPIC_BASE);
     // PCAT_COMPAT flag. If set means dual 8259 PIC is present.
     push_u32(&mut table, 0);
 
-    table.extend_from_slice(&[
-        0, 8, // Processor local APIC
-        0, 0, // ACPI processor ID, APIC ID
-    ]);
-    push_u32(&mut table, 1);
+    /* https://uefi.org/htmlspecs/ACPI_Spec_6_4_html/05_ACPI_Software_Programming_Model/ACPI_Software_Programming_Model.html#multiple-apic-description-table-madt */
+    for vcpu_id in 0..vcpu_count {
+        table.extend_from_slice(&[
+            0,
+            8, // Processor local APIC
+            vcpu_id as u8,
+            vcpu_id as u8, // ACPI processor ID, APIC ID
+        ]);
+        push_u32(&mut table, 1);
+    }
 
     table.extend_from_slice(&[
         1, 12, // I/O APIC
@@ -399,21 +405,22 @@ fn build_madt() -> Vec<u8> {
 
 fn build_fadt() -> Vec<u8> {
     let mut table = acpi_header(*b"FACP", 244, 6);
-    push_u32(&mut table, 0);         // Firmware Control
-    push_u32(&mut table, 0);         // DSDT
-    table.push(0);                              // Reserved
-    table.push(0);                              // Preferred PM Profile
+    push_u32(&mut table, 0); // Firmware Control
+    push_u32(&mut table, 0); // DSDT
+    table.push(0); // Reserved
+    table.push(0); // Preferred PM Profile
+
     /* https://uefi.org/htmlspecs/ACPI_Spec_6_4_html/05_ACPI_Software_Programming_Model/ACPI_Software_Programming_Model.html#fixed-acpi-description-table-fadt
-    / System vector the SCI interrupt is wired to in 8259 mode. 
-    / On systems that do not contain the 8259, 
+    / System vector the SCI interrupt is wired to in 8259 mode.
+    / On systems that do not contain the 8259,
     / this field contains the Global System interrupt number of the SCI interrupt.
     */
-    push_u16(&mut table, 9);         // SCI_INT
+    push_u16(&mut table, 9); // SCI_INT
 
     table.resize(244, 0);
 
-    table[109..111].copy_from_slice(&0u16.to_le_bytes());  // IAPC_BOOT_ARCH
-    
+    table[109..111].copy_from_slice(&0u16.to_le_bytes()); // IAPC_BOOT_ARCH
+
     finish_acpi_table(table)
 }
 
@@ -514,7 +521,7 @@ fn gdt_system_descriptor(type_bits: u8) -> u64 {
         | (((base >> 24) & 0xff) << 56)
 }
 
-fn linux32_boot_sregs() -> VcpuSregs {
+pub fn linux32_boot_sregs() -> VcpuSregs {
     let code = flat_segment(0x10, 0x0b);
     let data = flat_segment(0x18, 0x03);
 
@@ -637,7 +644,7 @@ mod tests {
 
     #[test]
     fn acpi_tables_have_valid_checksums() {
-        let madt = build_madt();
+        let madt = build_madt(4);
         let rsdt = build_rsdt(&[ACPI_MADT_GPA]);
         let rsdp = build_rsdp(ACPI_RSDT_GPA);
 
@@ -658,6 +665,18 @@ mod tests {
         assert_eq!(
             rsdp.iter().fold(0_u8, |sum, byte| sum.wrapping_add(*byte)),
             0
+        );
+    }
+
+    #[test]
+    fn madt_advertises_each_vcpu() {
+        let madt = build_madt(3);
+        let local_apic_entries = madt.windows(2).filter(|entry| *entry == [0, 8]).count();
+
+        assert_eq!(local_apic_entries, 3);
+        assert!(
+            madt.windows(8)
+                .any(|entry| entry == [0, 8, 2, 2, 1, 0, 0, 0])
         );
     }
 }
