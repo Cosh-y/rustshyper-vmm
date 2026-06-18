@@ -10,8 +10,8 @@ use libc::{MAP_ANONYMOUS, MAP_FAILED, MAP_PRIVATE, PROT_READ, PROT_WRITE, c_void
 
 use crate::ioctl::{
     RSH_CREATE_VCPU, RSH_CREATE_VM, RSH_GET_API_VERSION, RSH_GET_REGS, RSH_GET_SREGS,
-    RSH_INJECT_INTERRUPT, RSH_INJECT_IRQ, RSH_RUN, RSH_SET_REGS, RSH_SET_SREGS,
-    RSH_SET_USER_MEMORY_REGION, RunState, UserMemoryRegion, VcpuRegs, VcpuSregs,
+    RSH_INJECT_IRQ, RSH_RUN, RSH_SET_REGS, RSH_SET_SREGS, RSH_SET_USER_MEMORY_REGION, RunState,
+    UserMemoryRegion, VcpuRegs, VcpuSregs,
 };
 
 fn ioctl_request(req: libc::c_ulong) -> libc::Ioctl {
@@ -160,15 +160,15 @@ impl VcpuHandle {
         Ok(())
     }
 
-    pub fn inject_interrupt(&self, vector: u32) -> io::Result<()> {
-        ioctl_with_ref(self.file.as_raw_fd(), RSH_INJECT_INTERRUPT, &vector).map_err(|err| {
-            with_context(
-                err,
-                &format!("RSH_INJECT_INTERRUPT failed for vector={vector}"),
-            )
-        })?;
-        Ok(())
-    }
+    // pub fn inject_interrupt(&self, vector: u32) -> io::Result<()> {
+    //     ioctl_with_ref(self.file.as_raw_fd(), RSH_INJECT_INTERRUPT, &vector).map_err(|err| {
+    //         with_context(
+    //             err,
+    //             &format!("RSH_INJECT_INTERRUPT failed for vector={vector}"),
+    //         )
+    //     })?;
+    //     Ok(())
+    // }
 }
 
 #[derive(Debug)]

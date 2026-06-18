@@ -21,6 +21,8 @@ The VMM expects `RSH_RUN` to return a run-state structure that contains at least
 - `instruction_len`
 
 With those fields, the VMM can decode I/O exits for COM1 and emulate UART in userspace.
+The kernel does not pre-decode port I/O or MMIO subfields in `RSH_RUN`; userspace derives any
+needed I/O details from `exit_qualification`.
 
 The VMM also expects `RSH_SET_SREGS` to exist. The userspace side now programs Linux-style
 protected-mode segment/control-register state through that ioctl. The current kernel side can keep

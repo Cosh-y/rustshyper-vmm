@@ -156,78 +156,33 @@ pub struct VcpuSregs {
 
 #[repr(C)]
 #[derive(Debug, Clone, Copy, Default)]
-pub struct IoExit {
-    pub port: u16,
-    pub size: u8,
-    pub is_in: u8,
-    pub is_string: u8,
-    pub is_repeat: u8,
-    pub reserved: [u8; 2],
-    pub count: u32,
-    pub data: u64,
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
-pub struct MmioInfo {
-    pub phys_addr: u64,
-    pub data: u64,
-    pub len: u32,
-    pub is_write: u8,
-    pub reserved: [u8; 3],
-}
-
-#[repr(C)]
-#[derive(Debug, Clone, Copy, Default)]
 pub struct RunState {
     pub exit_reason: u32,
     pub instruction_len: u32,
     pub guest_rip: u64,
     pub guest_phys_addr: u64,
     pub exit_qualification: u64,
-    pub io: IoExit,
-    pub mmio: MmioInfo,
 }
 
 impl RunState {
     pub fn io_port(&self) -> u16 {
-        if self.io.port != 0 {
-            self.io.port
-        } else {
-            ((self.exit_qualification >> 16) & 0xffff) as u16
-        }
+        ((self.exit_qualification >> 16) & 0xffff) as u16
     }
 
     pub fn io_size(&self) -> u8 {
-        if self.io.size != 0 {
-            self.io.size
-        } else {
-            ((self.exit_qualification & 0b111) as u8) + 1
-        }
+        ((self.exit_qualification & 0b111) as u8) + 1
     }
 
     pub fn io_is_in(&self) -> bool {
-        if self.io.is_in != 0 {
-            true
-        } else {
-            (self.exit_qualification & (1 << 3)) != 0
-        }
+        (self.exit_qualification & (1 << 3)) != 0
     }
 
     pub fn io_is_string(&self) -> bool {
-        if self.io.is_string != 0 {
-            true
-        } else {
-            (self.exit_qualification & (1 << 4)) != 0
-        }
+        (self.exit_qualification & (1 << 4)) != 0
     }
 
     pub fn io_is_repeat(&self) -> bool {
-        if self.io.is_repeat != 0 {
-            true
-        } else {
-            (self.exit_qualification & (1 << 5)) != 0
-        }
+        (self.exit_qualification & (1 << 5)) != 0
     }
 }
 
@@ -241,6 +196,7 @@ mod tests {
         assert_eq!(RSH_CREATE_VM, 0x4801);
         assert_eq!(RSH_CREATE_VCPU, 0x40044841);
         assert_eq!(RSH_INJECT_IRQ, iow::<u32>(RSH_IOC_TYPE, 0x43));
+        assert_eq!(RSH_RUN, ior::<RunState>(RSH_IOC_TYPE, 0x80));
         assert_eq!(RSH_SET_SREGS, iow::<VcpuSregs>(RSH_IOC_TYPE, 0x84));
         assert_eq!(RSH_INJECT_INTERRUPT, iow::<u32>(RSH_IOC_TYPE, 0x85));
     }

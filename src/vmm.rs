@@ -27,11 +27,7 @@ use crate::{
 const UART_IRQ_LINE: u32 = 4;
 const DEFAULT_VCPU_COUNT: u32 = 1;
 const MAX_VCPU_COUNT: u32 = 64;
-const AP_VCPU_EXIT_THROTTLE: Duration = Duration::from_millis(10);
-const AP_VCPU_POLL_EXIT_YIELD_BEFORE_SLEEP: u64 = 16;
-const AP_VCPU_POLL_EXIT_SLEEP: Duration = Duration::from_micros(250);
-const AP_VCPU_POLL_EXIT_LONG_SLEEP_INTERVAL: u64 = 256;
-const AP_VCPU_POLL_EXIT_LONG_SLEEP: Duration = Duration::from_millis(1);
+const AP_VCPU_HLT_SLEEP_TIME: Duration = Duration::from_micros(250);
 
 #[derive(Debug, Clone)]
 pub struct VmmConfig {
@@ -159,10 +155,7 @@ impl Vmm {
     pub fn run(&mut self) -> io::Result<()> {
         let _raw_mode = TerminalRawMode::enable()?;
         let ap_vcpus = std::mem::take(&mut self.ap_vcpus);
-        let mut ap_threads = ApVcpuThreads::spawn(
-            ap_vcpus,
-            Arc::clone(&self.uart),
-        )?;
+        let mut ap_threads = ApVcpuThreads::spawn(ap_vcpus, Arc::clone(&self.uart))?;
         let result = self.run_linux_vcpu_loop(&mut ap_threads);
         ap_threads.stop_and_join();
         result
@@ -479,10 +472,7 @@ struct ApVcpuThreads {
 }
 
 impl ApVcpuThreads {
-    fn spawn(
-        ap_vcpus: Vec<ApVcpu>,
-        uart: Arc<Uart16550>,
-    ) -> io::Result<Self> {
+    fn spawn(ap_vcpus: Vec<ApVcpu>, uart: Arc<Uart16550>) -> io::Result<Self> {
         let stop = Arc::new(AtomicBool::new(false));
         let (error_tx, error_rx) = mpsc::channel();
         let mut handles: Vec<thread::JoinHandle<()>> = Vec::with_capacity(ap_vcpus.len());
@@ -557,14 +547,20 @@ fn run_ap_vcpu_loop(
                 handle_thread_io_exit(&vcpu, &uart, &run_state)?;
             }
             VMX_EXIT_REASON_HLT => {
+                // println!("AP HLT     at rip {:10x}, count: {:8}", run_state.guest_rip, consecutive_poll_exits);
                 consecutive_poll_exits = 0;
-                thread::sleep(AP_VCPU_EXIT_THROTTLE);
+                thread::sleep(AP_VCPU_HLT_SLEEP_TIME);
             }
             VMX_EXIT_REASON_PREEMPTION_TIMER => {
+                // if consecutive_poll_exits % 10 == 0 {
+                //     println!("AP preempt at rip {:10x}, count: {:8}", run_state.guest_rip, consecutive_poll_exits);
+                // }
                 consecutive_poll_exits = consecutive_poll_exits.wrapping_add(1);
-                throttle_ap_poll_exit(consecutive_poll_exits);
+                // throttle_ap_poll_exit(consecutive_poll_exits);
+                thread::yield_now();
             }
             VMX_EXIT_REASON_PAUSE_INSTRUCTION => {
+                // println!("AP pause   at rip {:10x}, count: {:8}", run_state.guest_rip, consecutive_poll_exits);
                 consecutive_poll_exits = consecutive_poll_exits.wrapping_add(1);
                 throttle_ap_poll_exit(consecutive_poll_exits);
             }
@@ -582,12 +578,15 @@ fn run_ap_vcpu_loop(
 }
 
 fn throttle_ap_poll_exit(consecutive_poll_exits: u64) {
-    if consecutive_poll_exits < AP_VCPU_POLL_EXIT_YIELD_BEFORE_SLEEP {
+    // if consecutive_poll_exits < AP_VCPU_POLL_EXIT_YIELD_BEFORE_SLEEP {
+    //     thread::yield_now();
+    // } else if consecutive_poll_exits.is_multiple_of(AP_VCPU_POLL_EXIT_LONG_SLEEP_INTERVAL) {
+    //     thread::sleep(AP_VCPU_POLL_EXIT_LONG_SLEEP);
+    // } else {
+    //     thread::sleep(AP_VCPU_POLL_EXIT_SLEEP);
+    // }
+    if consecutive_poll_exits > 10 {
         thread::yield_now();
-    } else if consecutive_poll_exits.is_multiple_of(AP_VCPU_POLL_EXIT_LONG_SLEEP_INTERVAL) {
-        thread::sleep(AP_VCPU_POLL_EXIT_LONG_SLEEP);
-    } else {
-        thread::sleep(AP_VCPU_POLL_EXIT_SLEEP);
     }
 }
 
